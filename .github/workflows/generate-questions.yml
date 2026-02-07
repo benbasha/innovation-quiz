@@ -1,0 +1,161 @@
+name: Generate Questions
+
+on:
+  workflow_dispatch:
+    inputs:
+      count:
+        description: 'Number of questions to generate'
+        required: true
+        default: '20'
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Claude CLI
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Get existing questions from Supabase
+        id: existing
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: |
+          # Get existing question topics and max ID
+          EXISTING=$(curl -s "${SUPABASE_URL}/rest/v1/questions?select=id,topic,lecture" \
+            -H "apikey: ${SUPABASE_SERVICE_KEY}" \
+            -H "Authorization: Bearer ${SUPABASE_SERVICE_KEY}")
+
+          echo "$EXISTING" > /tmp/existing_questions.json
+
+          # Get the max ID number for continuation
+          MAX_ID=$(echo "$EXISTING" | jq -r '[.[].id | ltrimstr("q") | tonumber] | max // 0')
+          NEXT_NUM=$((MAX_ID + 1))
+          NEXT_ID=$(printf "q%03d" $NEXT_NUM)
+
+          echo "next_id=$NEXT_ID" >> $GITHUB_OUTPUT
+          echo "count=$(echo "$EXISTING" | jq 'length')" >> $GITHUB_OUTPUT
+
+          # Build topic list for dedup
+          echo "$EXISTING" | jq -r '.[].topic' | sort -u > /tmp/existing_topics.txt
+
+      - name: Read content files
+        run: |
+          # Concatenate all content for Claude
+          echo "=== exam-gold.md ===" > /tmp/all_content.txt
+          cat content/exam-gold.md >> /tmp/all_content.txt
+          for i in 1 2 3 4 5 6; do
+            echo "" >> /tmp/all_content.txt
+            echo "=== lecture-${i}.md ===" >> /tmp/all_content.txt
+            cat "content/lecture-${i}.md" >> /tmp/all_content.txt
+          done
+
+      - name: Generate questions with Claude
+        env:
+          CLAUDE_CODE_USE_BEDROCK: 0
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+        run: |
+          EXISTING_TOPICS=$(cat /tmp/existing_topics.txt)
+          CONTENT=$(cat /tmp/all_content.txt)
+          PROMPT_TEMPLATE=$(cat scripts/prompt-template.md)
+          COUNT=${{ github.event.inputs.count }}
+          NEXT_ID=${{ steps.existing.outputs.next_id }}
+
+          FULL_PROMPT=$(cat <<ENDPROMPT
+          ${PROMPT_TEMPLATE}
+
+          ## הנחיות נוספות
+
+          - צור בדיוק ${COUNT} שאלות חדשות.
+          - מספר ID_START = ${NEXT_ID}
+          - נושאים קיימים שאסור לחזור עליהם:
+          ${EXISTING_TOPICS}
+
+          ## תוכן ההרצאות
+
+          ${CONTENT}
+
+          החזר אך ורק מערך JSON תקין.
+          ENDPROMPT
+          )
+
+          claude -p --model opus --output-format json "$FULL_PROMPT" > /tmp/generated.json 2>/tmp/claude_stderr.log || true
+
+          # Extract the JSON result from Claude's output
+          # The output-format json wraps it, so extract the result field
+          if jq -e '.result' /tmp/generated.json > /dev/null 2>&1; then
+            jq -r '.result' /tmp/generated.json > /tmp/questions_raw.txt
+          else
+            cp /tmp/generated.json /tmp/questions_raw.txt
+          fi
+
+          # Try to extract JSON array from the output (Claude might add text around it)
+          python3 -c "
+          import json, re, sys
+          text = open('/tmp/questions_raw.txt').read()
+          # Find JSON array in the text
+          match = re.search(r'\[[\s\S]*\]', text)
+          if match:
+              data = json.loads(match.group())
+              json.dump(data, open('/tmp/questions.json', 'w'), ensure_ascii=False, indent=2)
+              print(f'Parsed {len(data)} questions')
+          else:
+              print('ERROR: No JSON array found in output', file=sys.stderr)
+              print('Raw output:', text[:500], file=sys.stderr)
+              sys.exit(1)
+          "
+
+      - name: Insert questions into Supabase
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: |
+          QUESTIONS=$(cat /tmp/questions.json)
+          COUNT=$(echo "$QUESTIONS" | jq 'length')
+          echo "Inserting $COUNT questions..."
+
+          # Insert in batches of 10
+          for i in $(seq 0 9 $((COUNT - 1))); do
+            BATCH=$(echo "$QUESTIONS" | jq ".[$i:$((i+10))]")
+            RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "${SUPABASE_URL}/rest/v1/questions" \
+              -H "apikey: ${SUPABASE_SERVICE_KEY}" \
+              -H "Authorization: Bearer ${SUPABASE_SERVICE_KEY}" \
+              -H "Content-Type: application/json" \
+              -H "Prefer: resolution=ignore-duplicates" \
+              -d "$BATCH")
+
+            HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+            BODY=$(echo "$RESPONSE" | sed '$d')
+
+            if [ "$HTTP_CODE" -ge 400 ]; then
+              echo "Error inserting batch at $i: $BODY"
+            else
+              echo "Inserted batch at $i OK"
+            fi
+          done
+
+          echo "Done! Inserted questions into Supabase."
+
+      - name: Summary
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: |
+          TOTAL=$(curl -s "${SUPABASE_URL}/rest/v1/questions?select=id" \
+            -H "apikey: ${SUPABASE_SERVICE_KEY}" \
+            -H "Authorization: Bearer ${SUPABASE_SERVICE_KEY}" \
+            -H "Prefer: count=exact" \
+            -H "Range-Unit: items" \
+            -H "Range: 0-0" \
+            -I | grep -i content-range | grep -o '/[0-9]*' | tr -d '/')
+
+          echo "## Summary" >> $GITHUB_STEP_SUMMARY
+          echo "- Generated: ${{ github.event.inputs.count }} questions" >> $GITHUB_STEP_SUMMARY
+          echo "- Total in database: ${TOTAL}" >> $GITHUB_STEP_SUMMARY
