@@ -4,6 +4,18 @@ const Quiz = (() => {
   let roundScore = 0;
   let wrongAnswers = [];
   let answered = false;
+  let optionMap = []; // maps displayed index -> original index
+
+  function shuffleOptions(question) {
+    // Create index array [0,1,2,3], shuffle it
+    const indices = [0, 1, 2, 3];
+    shuffle(indices);
+    optionMap = indices;
+    return {
+      options: indices.map(i => question.options[i]),
+      correctDisplay: indices.indexOf(question.correct)
+    };
+  }
 
   function buildRound(allQuestions, questionProgress) {
     const failed = [];
@@ -95,6 +107,9 @@ const Quiz = (() => {
 
   function showCurrentQuestion() {
     answered = false;
+    const question = currentRound[currentIndex];
+    const shuffled = shuffleOptions(question);
+
     const dots = currentRound.map((_, i) => {
       if (i < currentIndex) {
         const wasWrong = wrongAnswers.some(w => w.questionId === currentRound[i].id);
@@ -104,7 +119,13 @@ const Quiz = (() => {
       return '';
     });
 
-    UI.renderQuestion(currentIndex, currentRound.length, currentRound[currentIndex], dots);
+    // Pass question with shuffled options
+    const displayQuestion = {
+      ...question,
+      options: shuffled.options,
+      correct: shuffled.correctDisplay
+    };
+    UI.renderQuestion(currentIndex, currentRound.length, displayQuestion, dots);
   }
 
   async function answerQuestion(selectedIdx) {
@@ -112,15 +133,18 @@ const Quiz = (() => {
     answered = true;
 
     const question = currentRound[currentIndex];
-    const isCorrect = selectedIdx === question.correct;
+    // selectedIdx is in shuffled space, compare against shuffled correct
+    const correctDisplayIdx = optionMap.indexOf(question.correct);
+    const isCorrect = selectedIdx === correctDisplayIdx;
 
     if (isCorrect) {
       roundScore++;
     } else {
-      wrongAnswers.push({ questionId: question.id, selectedIdx });
+      // Store the original index for the results review screen
+      wrongAnswers.push({ questionId: question.id, selectedIdx: optionMap[selectedIdx] });
     }
 
-    UI.showAnswer(selectedIdx, question.correct, question.explanation, isCorrect);
+    UI.showAnswer(selectedIdx, correctDisplayIdx, question.explanation, isCorrect);
 
     // Record in Supabase
     await Storage.recordAnswer(App.state.username, question.id, isCorrect);
