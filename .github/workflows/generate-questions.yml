@@ -28,8 +28,8 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
         run: |
-          # Get existing question topics and max ID
-          EXISTING=$(curl -s "${SUPABASE_URL}/rest/v1/questions?select=id,topic,lecture" \
+          # Get all existing questions (full text for dedup)
+          EXISTING=$(curl -s "${SUPABASE_URL}/rest/v1/questions?select=id,topic,lecture,question" \
             -H "apikey: ${SUPABASE_SERVICE_KEY}" \
             -H "Authorization: Bearer ${SUPABASE_SERVICE_KEY}")
 
@@ -43,12 +43,11 @@ jobs:
           echo "next_id=$NEXT_ID" >> $GITHUB_OUTPUT
           echo "count=$(echo "$EXISTING" | jq 'length')" >> $GITHUB_OUTPUT
 
-          # Build topic list for dedup
+          # Build topic list for Claude context
           echo "$EXISTING" | jq -r '.[].topic' | sort -u > /tmp/existing_topics.txt
 
       - name: Read content files
         run: |
-          # Concatenate all content for Claude
           echo "=== exam-gold.md ===" > /tmp/all_content.txt
           cat content/exam-gold.md >> /tmp/all_content.txt
           for i in 1 2 3 4 5 6; do
@@ -71,36 +70,34 @@ jobs:
           FULL_PROMPT=$(cat <<ENDPROMPT
           ${PROMPT_TEMPLATE}
 
-          ## הנחיות נוספות
+          ## Additional Instructions
 
-          - צור בדיוק ${COUNT} שאלות חדשות.
-          - מספר ID_START = ${NEXT_ID}
-          - נושאים קיימים שאסור לחזור עליהם:
+          - Generate exactly ${COUNT} new questions.
+          - ID_START = ${NEXT_ID}
+          - Existing topics that must NOT be repeated:
           ${EXISTING_TOPICS}
 
-          ## תוכן ההרצאות
+          ## Lecture Content
 
           ${CONTENT}
 
-          החזר אך ורק מערך JSON תקין.
+          Return ONLY a valid JSON array. No text before or after.
           ENDPROMPT
           )
 
           claude -p --model opus --output-format json "$FULL_PROMPT" > /tmp/generated.json 2>/tmp/claude_stderr.log || true
 
           # Extract the JSON result from Claude's output
-          # The output-format json wraps it, so extract the result field
           if jq -e '.result' /tmp/generated.json > /dev/null 2>&1; then
             jq -r '.result' /tmp/generated.json > /tmp/questions_raw.txt
           else
             cp /tmp/generated.json /tmp/questions_raw.txt
           fi
 
-          # Try to extract JSON array from the output (Claude might add text around it)
+          # Parse JSON array from output
           python3 -c "
           import json, re, sys
           text = open('/tmp/questions_raw.txt').read()
-          # Find JSON array in the text
           match = re.search(r'\[[\s\S]*\]', text)
           if match:
               data = json.loads(match.group())
@@ -112,13 +109,61 @@ jobs:
               sys.exit(1)
           "
 
+      - name: Deduplicate against existing questions
+        run: |
+          python3 -c "
+          import json, sys
+          from difflib import SequenceMatcher
+
+          existing = json.load(open('/tmp/existing_questions.json'))
+          new_qs = json.load(open('/tmp/questions.json'))
+
+          existing_texts = [q['question'] for q in existing]
+          existing_topics = [q['topic'] for q in existing]
+
+          def is_duplicate(new_q):
+              # Check exact question text match
+              if new_q['question'] in existing_texts:
+                  return True
+              # Check fuzzy match on question text (>85% similar)
+              for et in existing_texts:
+                  if SequenceMatcher(None, new_q['question'], et).ratio() > 0.85:
+                      print(f'  Fuzzy dup: {new_q[\"question\"][:60]}...')
+                      return True
+              # Check exact topic match
+              if new_q['topic'] in existing_topics:
+                  return True
+              return False
+
+          unique = [q for q in new_qs if not is_duplicate(q)]
+          removed = len(new_qs) - len(unique)
+
+          if removed > 0:
+              print(f'Removed {removed} duplicate(s), keeping {len(unique)} unique questions')
+              # Re-number IDs sequentially
+              existing_ids = [q['id'] for q in existing]
+              max_num = max([int(qid.lstrip('q')) for qid in existing_ids]) if existing_ids else 0
+              for i, q in enumerate(unique):
+                  q['id'] = f'q{max_num + 1 + i:03d}'
+          else:
+              print(f'No duplicates found, all {len(unique)} questions are unique')
+
+          json.dump(unique, open('/tmp/questions_deduped.json', 'w'), ensure_ascii=False, indent=2)
+          " || { echo "Dedup failed, using original"; cp /tmp/questions.json /tmp/questions_deduped.json; }
+
       - name: Insert questions into Supabase
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
         run: |
-          QUESTIONS=$(cat /tmp/questions.json)
+          QUESTIONS=$(cat /tmp/questions_deduped.json)
           COUNT=$(echo "$QUESTIONS" | jq 'length')
+
+          if [ "$COUNT" -eq 0 ]; then
+            echo "No questions to insert (all were duplicates)"
+            exit 0
+          fi
+
           echo "Inserting $COUNT questions..."
 
           # Insert in batches of 10
@@ -141,7 +186,7 @@ jobs:
             fi
           done
 
-          echo "Done! Inserted questions into Supabase."
+          echo "Done!"
 
       - name: Summary
         env:
@@ -156,6 +201,13 @@ jobs:
             -H "Range: 0-0" \
             -I | grep -i content-range | grep -o '/[0-9]*' | tr -d '/')
 
+          INSERTED=$(cat /tmp/questions_deduped.json | jq 'length')
+          GENERATED=$(cat /tmp/questions.json | jq 'length')
+          DUPES=$((GENERATED - INSERTED))
+
           echo "## Summary" >> $GITHUB_STEP_SUMMARY
-          echo "- Generated: ${{ github.event.inputs.count }} questions" >> $GITHUB_STEP_SUMMARY
+          echo "- Requested: ${{ github.event.inputs.count }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Generated by Claude: ${GENERATED}" >> $GITHUB_STEP_SUMMARY
+          echo "- Duplicates removed: ${DUPES}" >> $GITHUB_STEP_SUMMARY
+          echo "- Inserted: ${INSERTED}" >> $GITHUB_STEP_SUMMARY
           echo "- Total in database: ${TOTAL}" >> $GITHUB_STEP_SUMMARY
