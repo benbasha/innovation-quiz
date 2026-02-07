@@ -5,12 +5,22 @@ const App = (() => {
   };
 
   async function init() {
-    Storage.init();
-    await UI.loadMetadata();
+    try {
+      Storage.init();
+      await UI.loadMetadata();
 
-    // Hash routing
-    window.addEventListener('hashchange', handleRoute);
-    handleRoute();
+      // Hash routing
+      window.addEventListener('hashchange', handleRoute);
+      await handleRoute();
+    } catch (e) {
+      console.error('Init failed:', e);
+      document.getElementById('loading').innerHTML = `
+        <div style="text-align:center;padding:40px;direction:rtl">
+          <p style="color:#ef4444;font-size:16px;margin-bottom:8px">שגיאה בטעינה</p>
+          <p style="color:#6b7280;font-size:14px">${e.message}</p>
+        </div>
+      `;
+    }
   }
 
   async function handleRoute() {
@@ -39,9 +49,19 @@ const App = (() => {
     state.username = null;
     state.activeRound = null;
 
-    const users = await Storage.loadAllUsers();
-    UI.renderUserSelect(users);
-    UI.showScreen('user-select');
+    try {
+      const users = await Storage.loadAllUsers();
+      UI.renderUserSelect(users);
+      UI.showScreen('user-select');
+    } catch (e) {
+      console.error('Failed to load users:', e);
+      document.getElementById('loading').innerHTML = `
+        <div style="text-align:center;padding:40px;direction:rtl">
+          <p style="color:#ef4444;font-size:16px;margin-bottom:8px">שגיאה בטעינה</p>
+          <p style="color:#6b7280;font-size:14px">${e.message}</p>
+        </div>
+      `;
+    }
   }
 
   async function selectUser(username) {

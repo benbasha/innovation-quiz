@@ -56,48 +56,52 @@ jobs:
             cat "content/lecture-${i}.md" >> /tmp/all_content.txt
           done
 
+      - name: Build prompt file
+        run: |
+          COUNT=${{ github.event.inputs.count }}
+          NEXT_ID=${{ steps.existing.outputs.next_id }}
+
+          # Build the full prompt as a file (too large for CLI arg)
+          cat scripts/prompt-template.md > /tmp/full_prompt.txt
+          echo "" >> /tmp/full_prompt.txt
+          echo "## Additional Instructions" >> /tmp/full_prompt.txt
+          echo "" >> /tmp/full_prompt.txt
+          echo "- Generate exactly ${COUNT} new questions." >> /tmp/full_prompt.txt
+          echo "- ID_START = ${NEXT_ID}" >> /tmp/full_prompt.txt
+          echo "- Existing topics that must NOT be repeated:" >> /tmp/full_prompt.txt
+          cat /tmp/existing_topics.txt >> /tmp/full_prompt.txt
+          echo "" >> /tmp/full_prompt.txt
+          echo "## Lecture Content" >> /tmp/full_prompt.txt
+          echo "" >> /tmp/full_prompt.txt
+          cat /tmp/all_content.txt >> /tmp/full_prompt.txt
+          echo "" >> /tmp/full_prompt.txt
+          echo "Return ONLY a valid JSON array. No text before or after." >> /tmp/full_prompt.txt
+
+          echo "Prompt file size: $(wc -c < /tmp/full_prompt.txt) bytes"
+
       - name: Generate questions with Claude
         env:
           CLAUDE_CODE_USE_BEDROCK: 0
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
         run: |
-          EXISTING_TOPICS=$(cat /tmp/existing_topics.txt)
-          CONTENT=$(cat /tmp/all_content.txt)
-          PROMPT_TEMPLATE=$(cat scripts/prompt-template.md)
-          COUNT=${{ github.event.inputs.count }}
-          NEXT_ID=${{ steps.existing.outputs.next_id }}
+          # Pipe prompt via stdin to avoid ARG_MAX issues
+          cat /tmp/full_prompt.txt | claude -p --model opus > /tmp/generated_raw.txt 2>/tmp/claude_stderr.log
+          EXIT_CODE=$?
 
-          FULL_PROMPT=$(cat <<ENDPROMPT
-          ${PROMPT_TEMPLATE}
+          echo "Claude exit code: $EXIT_CODE"
+          echo "Output size: $(wc -c < /tmp/generated_raw.txt) bytes"
+          echo "Stderr:"
+          cat /tmp/claude_stderr.log || true
 
-          ## Additional Instructions
-
-          - Generate exactly ${COUNT} new questions.
-          - ID_START = ${NEXT_ID}
-          - Existing topics that must NOT be repeated:
-          ${EXISTING_TOPICS}
-
-          ## Lecture Content
-
-          ${CONTENT}
-
-          Return ONLY a valid JSON array. No text before or after.
-          ENDPROMPT
-          )
-
-          claude -p --model opus --output-format json "$FULL_PROMPT" > /tmp/generated.json 2>/tmp/claude_stderr.log || true
-
-          # Extract the JSON result from Claude's output
-          if jq -e '.result' /tmp/generated.json > /dev/null 2>&1; then
-            jq -r '.result' /tmp/generated.json > /tmp/questions_raw.txt
-          else
-            cp /tmp/generated.json /tmp/questions_raw.txt
+          if [ ! -s /tmp/generated_raw.txt ]; then
+            echo "ERROR: Claude produced empty output"
+            exit 1
           fi
 
-          # Parse JSON array from output
+          # Parse JSON array from output (Claude may wrap with text)
           python3 -c "
           import json, re, sys
-          text = open('/tmp/questions_raw.txt').read()
+          text = open('/tmp/generated_raw.txt').read()
           match = re.search(r'\[[\s\S]*\]', text)
           if match:
               data = json.loads(match.group())
@@ -105,7 +109,7 @@ jobs:
               print(f'Parsed {len(data)} questions')
           else:
               print('ERROR: No JSON array found in output', file=sys.stderr)
-              print('Raw output:', text[:500], file=sys.stderr)
+              print('Raw output (first 1000 chars):', text[:1000], file=sys.stderr)
               sys.exit(1)
           "
 
