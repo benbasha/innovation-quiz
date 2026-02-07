@@ -70,7 +70,7 @@ body {
 }
 
 /* Loading */
-#loading {
+#loading.active {
   display: flex;
   align-items: center;
   justify-content: center;
