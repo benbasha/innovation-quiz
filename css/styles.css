@@ -378,6 +378,53 @@ body {
   margin-top: 8px;
 }
 
+/* Mode Buttons */
+.mode-buttons {
+  display: flex;
+  gap: 10px;
+}
+
+.mode-buttons .start-btn {
+  flex: 1;
+}
+
+.exam-btn {
+  background: linear-gradient(135deg, #f59e0b, #f97316) !important;
+}
+
+.exam-btn:hover {
+  background: linear-gradient(135deg, #d97706, #ea580c) !important;
+}
+
+.exam-hint {
+  text-align: center;
+  font-size: 12px;
+  color: var(--gray-400);
+  margin-top: 8px;
+}
+
+/* Exam badge in quiz header */
+.exam-badge {
+  background: linear-gradient(135deg, #f59e0b, #f97316);
+  color: white;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 3px 10px;
+  border-radius: 99px;
+}
+
+/* Exam results badge */
+.exam-results-badge {
+  background: linear-gradient(135deg, #f59e0b, #f97316);
+  color: white;
+  font-size: 14px;
+  font-weight: 600;
+  padding: 6px 16px;
+  border-radius: 99px;
+  display: inline-block;
+  margin-bottom: 16px;
+}
+
 .no-questions-notice {
   text-align: center;
   padding: 20px;

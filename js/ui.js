@@ -161,10 +161,22 @@ const UI = (() => {
         </div>
       ` : ''}
 
-      <button class="start-btn" id="start-round" ${noQuestions ? 'disabled' : ''}>
-        ${hasActiveRound ? 'המשך סיבוב' : 'התחל סיבוב'}
-      </button>
-      ${hasActiveRound ? '<div class="resume-notice">יש סיבוב פתוח בהמתנה</div>' : ''}
+      ${hasActiveRound ? `
+        <button class="start-btn" id="start-round" ${noQuestions ? 'disabled' : ''}>
+          המשך סיבוב
+        </button>
+        <div class="resume-notice">יש סיבוב פתוח בהמתנה</div>
+      ` : `
+        <div class="mode-buttons">
+          <button class="start-btn" id="start-round" ${noQuestions ? 'disabled' : ''}>
+            התחל סיבוב
+          </button>
+          <button class="start-btn exam-btn" id="start-exam" ${noQuestions ? 'disabled' : ''}>
+            מצב מבחן
+          </button>
+        </div>
+        <div class="exam-hint">מבחן = 20 שאלות מתוייגות למבחן בלבד</div>
+      `}
     `;
 
     document.getElementById('dash-back').addEventListener('click', () => {
@@ -172,13 +184,21 @@ const UI = (() => {
     });
 
     document.getElementById('start-round').addEventListener('click', () => {
-      if (!noQuestions) Quiz.startRound();
+      if (!noQuestions) Quiz.startRound(hasActiveRound ? undefined : 'practice');
     });
+
+    const examBtn = document.getElementById('start-exam');
+    if (examBtn) {
+      examBtn.addEventListener('click', () => {
+        if (!noQuestions) Quiz.startRound('exam');
+      });
+    }
   }
 
   // Quiz Screen
   function renderQuestion(questionIndex, total, question, dots) {
     const el = document.getElementById('quiz');
+    const isExam = App.state.quizMode === 'exam';
     const importanceLabel = {
       'exam-explicit': 'יהיה במבחן',
       'remember': 'תזכרו',
@@ -190,6 +210,7 @@ const UI = (() => {
     el.innerHTML = `
       <div class="quiz-header">
         <button class="quiz-close" id="quiz-exit">&times;</button>
+        ${isExam ? '<span class="exam-badge">מבחן</span>' : ''}
         <span class="quiz-progress-text">${questionIndex + 1} / ${total}</span>
       </div>
 
@@ -259,8 +280,9 @@ const UI = (() => {
   }
 
   // Results Screen
-  function renderResults(score, total, wrongAnswers, allQuestions) {
+  function renderResults(score, total, wrongAnswers, allQuestions, mode) {
     const el = document.getElementById('results');
+    const isExam = mode === 'exam';
     const pct = Math.round((score / total) * 100);
     let grade, msg;
     if (pct === 100) { grade = 'perfect'; msg = 'מושלם! 🔥'; }
@@ -270,6 +292,7 @@ const UI = (() => {
 
     el.innerHTML = `
       <div class="results-container">
+        ${isExam ? '<div class="exam-results-badge">תוצאות מבחן</div>' : ''}
         <div class="results-score">
           <div class="score-circle ${grade}">
             <div class="score-num">${score}</div>
@@ -304,7 +327,7 @@ const UI = (() => {
     `;
 
     document.getElementById('new-round').addEventListener('click', () => {
-      Quiz.startRound();
+      Quiz.startRound(mode);
     });
 
     document.getElementById('go-dashboard').addEventListener('click', () => {

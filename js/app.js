@@ -1,7 +1,8 @@
 const App = (() => {
   const state = {
     username: null,
-    activeRound: null
+    activeRound: null,
+    quizMode: 'practice' // 'practice' | 'exam'
   };
 
   async function init() {

@@ -17,7 +17,15 @@ const Quiz = (() => {
     };
   }
 
-  function buildRound(allQuestions, questionProgress) {
+  function buildRound(allQuestions, questionProgress, mode) {
+    const isExam = mode === 'exam';
+    const roundSize = isExam ? 20 : 10;
+
+    // Filter to exam-tagged questions only in exam mode
+    const pool = isExam
+      ? allQuestions.filter(q => q.importance === 'exam-explicit' || q.importance === 'remember')
+      : allQuestions;
+
     const failed = [];
     const unseen = [];
     const passed = [];
@@ -25,7 +33,7 @@ const Quiz = (() => {
     const progressMap = {};
     questionProgress.forEach(qp => { progressMap[qp.question_id] = qp; });
 
-    allQuestions.forEach(q => {
+    pool.forEach(q => {
       const p = progressMap[q.id];
       if (!p) unseen.push(q);
       else if (p.status === 'failed') failed.push(q);
@@ -37,22 +45,21 @@ const Quiz = (() => {
     shuffle(passed);
 
     const round = [];
+    const maxFailed = isExam ? 10 : 5;
 
-    // Up to 5 failed questions
-    const failedPick = failed.slice(0, 5);
-    round.push(...failedPick);
+    // Up to maxFailed failed questions
+    round.push(...failed.slice(0, maxFailed));
 
     // Fill with unseen
-    const remaining = 10 - round.length;
+    const remaining = roundSize - round.length;
     round.push(...unseen.slice(0, remaining));
 
     // If still not enough, add passed for review
-    if (round.length < 10) {
-      const need = 10 - round.length;
+    if (round.length < roundSize) {
+      const need = roundSize - round.length;
       round.push(...passed.slice(0, need));
     }
 
-    // If we have fewer than 10 total questions, just use what we have
     shuffle(round);
     return round;
   }
@@ -65,7 +72,7 @@ const Quiz = (() => {
     return arr;
   }
 
-  async function startRound() {
+  async function startRound(mode) {
     const state = App.state;
 
     // Check for active round to resume
@@ -74,33 +81,38 @@ const Quiz = (() => {
       currentIndex = state.activeRound.currentIndex;
       roundScore = state.activeRound.score;
       wrongAnswers = state.activeRound.wrongAnswers || [];
+      state.quizMode = state.activeRound.mode || 'practice';
       showCurrentQuestion();
       UI.showScreen('quiz');
       return;
     }
 
+    state.quizMode = mode || 'practice';
+
     const allQuestions = await Storage.loadQuestions();
     const { questionProgress } = await Storage.loadProgress(state.username);
 
-    currentRound = buildRound(allQuestions, questionProgress);
+    currentRound = buildRound(allQuestions, questionProgress, state.quizMode);
     currentIndex = 0;
     roundScore = 0;
     wrongAnswers = [];
 
     if (currentRound.length === 0) {
-      alert('אין שאלות זמינות. בקשו ליצור שאלות חדשות.');
+      alert(state.quizMode === 'exam' ? 'אין שאלות מבחן זמינות.' : 'אין שאלות זמינות. בקשו ליצור שאלות חדשות.');
       return;
     }
 
     // Save active round
-    await Storage.saveActiveRound(state.username, {
+    const roundData = {
       questions: currentRound,
       currentIndex: 0,
       score: 0,
-      wrongAnswers: []
-    });
+      wrongAnswers: [],
+      mode: state.quizMode
+    };
+    await Storage.saveActiveRound(state.username, roundData);
 
-    state.activeRound = { questions: currentRound, currentIndex: 0, score: 0, wrongAnswers: [] };
+    state.activeRound = roundData;
     showCurrentQuestion();
     UI.showScreen('quiz');
   }
@@ -154,7 +166,8 @@ const Quiz = (() => {
       questions: currentRound,
       currentIndex: currentIndex + 1,
       score: roundScore,
-      wrongAnswers
+      wrongAnswers,
+      mode: App.state.quizMode
     };
     App.state.activeRound = activeRound;
     await Storage.saveActiveRound(App.state.username, activeRound);
@@ -170,7 +183,7 @@ const Quiz = (() => {
       App.state.activeRound = null;
 
       const allQuestions = await Storage.loadQuestions();
-      UI.renderResults(roundScore, currentRound.length, wrongAnswers, allQuestions);
+      UI.renderResults(roundScore, currentRound.length, wrongAnswers, allQuestions, App.state.quizMode);
       UI.showScreen('results');
       return;
     }
